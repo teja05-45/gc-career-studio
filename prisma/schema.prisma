@@ -1,0 +1,253 @@
+// GC Career Studio — Prisma schema
+//
+// Scope note: this schema covers the MVP domain (auth, services, leads,
+// bookings, testimonials) plus the tables Auth.js needs for its Prisma
+// adapter (Account, Session, VerificationToken) so OAuth can be added
+// later without a migration that touches existing data.
+//
+// Future entities (CandidateProfile, ConsultantProfile, Application,
+// CareerPlan, Document, Task, Message, Notification) are intentionally
+// NOT modeled here yet — seeing REQUIREMENTS.md / docs/ARCHITECTURE.md
+// for how they attach to `User` when that phase is built.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ───────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  CONSULTANT
+  CANDIDATE
+}
+
+enum CareerStage {
+  STUDENT
+  EARLY_CAREER
+  PROFESSIONAL
+  CAREER_SWITCHER
+  SENIOR_LEADER
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  CONVERTED
+  CLOSED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+// ── Auth ────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+
+  // Null for OAuth-only accounts (future). Always set for Credentials users.
+  passwordHash  String?
+
+  role          UserRole  @default(CANDIDATE)
+  phone         String?
+  careerStage   CareerStage?
+  currentRole   String?
+  targetRole    String?
+  experience    String?
+  skills        String?
+  careerGoals   String?   @db.Text
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts      Account[]
+  sessions      Session[]
+
+  // Bookings where this user is the candidate / the assigned consultant.
+  bookingsAsCandidate  Booking[] @relation("BookingCandidate")
+  bookingsAsConsultant Booking[] @relation("BookingConsultant")
+  reviews              Review[]
+
+  @@index([role])
+  @@map("users")
+}
+
+// Required by @auth/prisma-adapter for future OAuth providers. Unused by
+// the Credentials-only MVP flow but kept so adding Google/LinkedIn login
+// later is additive, not a migration against live user data.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ── Domain ──────────────────────────────────────────────────────────────
+
+model Service {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  summary     String
+  description String   @db.Text
+
+  problem     String   @db.Text
+  whoFor      String   @db.Text
+  included    String[]
+  process     Json
+  outcomes    String[]
+  faq         Json
+
+  isActive    Boolean  @default(true)
+  order       Int      @default(0)
+
+  leads       Lead[]
+  bookings    Booking[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive, order])
+  @@map("services")
+}
+
+model Lead {
+  id              String      @id @default(cuid())
+  name            String
+  email           String
+  phone           String?
+  careerStage     CareerStage
+  currentRole     String?
+  message         String?     @db.Text
+
+  serviceId       String?
+  service         Service?    @relation(fields: [serviceId], references: [id])
+
+  status          LeadStatus  @default(NEW)
+  notes           String?     @db.Text
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([status])
+  @@index([email])
+  @@index([createdAt])
+  @@map("leads")
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+
+  name            String
+  email           String
+  phone           String?
+  careerStage     CareerStage
+  currentRole     String?
+  targetRole      String?
+  careerGoal      String?       @db.Text
+  additionalContext String?     @db.Text
+
+  serviceId       String?
+  service         Service?      @relation(fields: [serviceId], references: [id])
+
+  preferredDate   DateTime
+  preferredSlot   String        // e.g. "10:00-10:30" — MVP-internal slot label
+
+  status          BookingStatus @default(PENDING)
+  notes           String?       @db.Text
+
+  candidateId     String?
+  candidate       User?         @relation("BookingCandidate", fields: [candidateId], references: [id])
+
+  consultantId    String?
+  consultant      User?         @relation("BookingConsultant", fields: [consultantId], references: [id])
+
+  review          Review?
+
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([status])
+  @@index([preferredDate])
+  @@unique([preferredDate, preferredSlot])
+  @@map("bookings")
+}
+
+model Testimonial {
+  id         String   @id @default(cuid())
+  name       String
+  role       String
+  challenge  String   @db.Text
+  approach   String   @db.Text
+  outcome    String   @db.Text
+  isDemo     Boolean  @default(true)
+  order      Int      @default(0)
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("testimonials")
+}
+
+model Review {
+  id          String   @id @default(cuid())
+  bookingId   String   @unique
+  candidateId String
+  rating      Int      // 1-5
+  comment     String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  candidate User    @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+  @@map("reviews")
+}
