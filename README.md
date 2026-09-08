@@ -350,11 +350,17 @@ gc-career-studio/
 
 ## Environment Variables
 
-Never commit secrets. Create a `.env` or `.env.local` file for local/Node deploys, or pass the same names into Docker / Vercel.
+Never commit secrets. Copy `.env.example` → `.env`, fill in real values, and pass the same names into Docker / Vercel.
+
+**The `DATABASE_URL` rule that prevents most deploy failures:**
+
+- **On Vercel:** the Prisma Postgres integration **injects `DATABASE_URL` automatically.** Do **not** add your own value in the Vercel dashboard.
+- **Locally (for `npx prisma db push` / `npm run db:seed`):** set `DATABASE_URL` in `.env` to the **direct, non-pooled** connection string from the Prisma Postgres panel (host `db.prisma.io`, `?sslmode=require`).
+- An **already-set OS environment variable** named `DATABASE_URL` **always overrides `.env`**. If Prisma ever connects to a host you don't recognize, check for a stale one (`echo %DATABASE_URL%`).
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `DATABASE_URL` | Yes | Postgres connection string used by Prisma |
+| `DATABASE_URL` | Yes | Postgres connection string used by Prisma. Injected on Vercel; set locally to the direct Prisma Postgres URL for CLI commands |
 | `AUTH_SECRET` | Yes in production | Auth.js session signing key. Generate with `openssl rand -base64 32` |
 | `AUTH_URL` | Yes | Public origin of the app (`http://localhost:3000` locally) |
 | `ADMIN_EMAIL` | For first admin | Seeded admin login. Default in Docker: `admin@example.com` |
@@ -362,7 +368,7 @@ Never commit secrets. Create a `.env` or `.env.local` file for local/Node deploy
 | `ADMIN_NAME` | No | Display name for the seeded admin |
 | `GROQ_API_KEY` / `GEMINI_API_KEY` | No | Optional Career Direction Assistant. The app runs without them |
 
-Example local file:
+For local Docker / Node runs, a minimal file:
 
 ```
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/gc_career_studio
@@ -554,9 +560,11 @@ npm run db:seed      # re-seed services + admin (does not wipe leads)
 
 ---
 
-### Option C — Vercel + hosted Postgres (public URL)
+### Option C — Vercel + Prisma Postgres (public URL)
 
-Use this when you want a public `https://…vercel.app` URL. The Next.js app runs on Vercel; Postgres runs elsewhere (Neon, Railway, Render, or Vercel Postgres).
+The path used to deploy this project to production. The Next.js app runs on Vercel; the database is **Prisma Postgres**, connected through the Vercel Storage integration.
+
+> **The one step everyone misses:** Vercel builds the app but **nothing creates or seeds the production database for you.** Skip the `db push` + `db seed` step and every server-side query fails at runtime with `The table "public.X" does not exist` — even though the build succeeded. That "Application error: a server-side exception" page is almost always this.
 
 #### 1. Push the repo to GitHub
 
@@ -569,84 +577,81 @@ git remote add origin https://github.com/YOUR_USERNAME/gc-career-studio.git
 git push -u origin main
 ```
 
-#### 2. Create a hosted Postgres database
+#### 2. Import the project on Vercel (framework preset matters!)
 
-Any of these work. Copy the **full** `DATABASE_URL` (it is long — do not truncate).
+1. Go to [vercel.com](https://vercel.com/), **Add New… → Project**, import `gc-career-studio`.
+2. Make sure the **Framework Preset says "Next.js"** (it auto-detects on import from GitHub).
+   - ⚠️ If it ever reads "Other", the build fails with `Error: No entrypoint found. Searched for: src/main.{js,cjs,…}`. **Fix:** re-import via the GitHub flow, or set Framework Preset → Next.js manually. Do **not** add a `vercel.json` — it doesn't help and can make things worse.
+3. Build command stays `next build`.
 
-- [Neon](https://neon.tech/) — create a project, copy the connection string. Prefer the pooled URL if Neon shows one, and append `?sslmode=require` if it is not already there.
-- [Railway](https://railway.app/) — New Project → Add PostgreSQL → Variables → `DATABASE_URL`.
-- [Render](https://render.com/) — New PostgreSQL (free tier) → copy the external connection string.
+#### 3. Create the database (Vercel Storage → Prisma Postgres)
 
-#### 3. Import the project on Vercel
+1. In the Vercel project, go to **Storage → Create Database → Prisma Postgres**.
+2. Pick a region, hit create.
+3. The integration **automatically injects `DATABASE_URL` into your project's environment variables** (Production + Preview). It also gives you two connection strings in its panel:
+   - **pooled** — what the app uses on Vercel (injected for you)
+   - **direct** (host `db.prisma.io`, `?sslmode=require`) — used for local `db push`/`db seed`
 
-1. Go to [https://vercel.com/](https://vercel.com/) and sign in with GitHub.
-2. **Add New… → Project** and import `gc-career-studio`.
-3. Framework: Next.js (auto-detected). Leave the build command as `next build`.
-4. **Do not deploy yet** — add environment variables first.
+   **Do not paste your own `DATABASE_URL` over the injected one in Vercel.**
 
-#### 4. Set environment variables in Vercel
+#### 4. Add the non-database environment variables in Vercel
 
-Project → Settings → Environment Variables. Add for Production (and Preview if you want preview deploys to work):
+Project → Settings → Environment Variables → (Production + Preview):
 
 ```
-DATABASE_URL=<the hosted Postgres URL>
 AUTH_SECRET=<output of: openssl rand -base64 32>
-AUTH_URL=https://YOUR-PROJECT.vercel.app
+AUTH_URL=https://gc-career-studio.vercel.app
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=<min 8 chars, change after first login>
 ```
 
-After the first deploy, Vercel shows the exact URL. If it is not what you guessed, update `AUTH_URL` to match and redeploy.
+Leave `DATABASE_URL` alone — it's already there from the integration. After the first deploy, update `AUTH_URL` to the *exact* URL Vercel reports (no trailing slash) if it differs, then **Redeploy**.
 
-#### 5. Deploy the app
+#### 5. Deploy
 
-Click **Deploy** (or push to `main`). Wait until the build is Ready.
+Click **Deploy** (or push to `main`). The build should turn **Ready**. This does **not** mean the site works yet — the database is empty.
 
-#### 6. Apply the schema and seed **against the hosted database**
+#### 6. Push the schema + seed the production database (from your machine)
 
-Vercel does not run `docker-entrypoint.sh`. You must push the schema once from your machine, using the same `DATABASE_URL`:
+This must run **once, against the Prisma Postgres database,** not locally.
 
-```bash
-# from the project root, with DATABASE_URL pointing at hosted Postgres
-npx prisma db push
-npm run db:seed
-```
+1. Copy the **direct** connection string from the Storage panel into your `.env`:
+   ```
+   DATABASE_URL=postgres://<the-direct-non-pooled-url>@db.prisma.io:5432/postgres?sslmode=require
+   ```
+   (Or run the commands with the variable set in-shell — see the shell syntax below. `.env` is cleaner because Prisma CLI auto-loads it.)
+2. Run, from the project root:
+   ```bash
+   npx prisma db push
+   npm run db:seed
+   ```
+   You should see the schema sync, then `Admin account ready: admin@example.com`.
 
-Ways to get `DATABASE_URL` locally:
+⚠️ **Windows shell gotchas** (do not use `DATABASE_URL="..." npx ...` inline):
 
-```bash
-# if the Vercel CLI is installed
-npx vercel env pull .env.local
-# then run the two commands above (they read DATABASE_URL from the environment)
-```
+| Shell | Correct syntax |
+|---|---|
+| cmd | `set "DATABASE_URL=postgres://..." && npx prisma db push` |
+| PowerShell | `$env:DATABASE_URL="postgres://..."; npx prisma db push` |
+| Git Bash | `DATABASE_URL="postgres://..." npx prisma db push` |
 
-Or paste `DATABASE_URL` into your shell for that session only. Do not commit it.
+If Prisma still resolves to a **Railway** or other foreign host (`postgres.railway.internal`), a stale `DATABASE_URL` env var set on your OS is overriding everything. Check `echo %DATABASE_URL%` and delete it (Windows → System → Environment Variables) — env vars always beat `.env`.
 
-This is `db push`, not `prisma migrate deploy`. The migrations folder in this repo is not a complete baseline, so `migrate deploy` on an empty hosted database will fail.
+Why not `prisma migrate deploy`? The checked-in migration folder is incremental `ALTER`s, not a baseline — it will fail on an empty database. `db push` is the correct tool for fresh databases, and Docker Compose uses the same approach.
 
 #### 7. Verify
 
-1. Open `AUTH_URL` — homepage loads.
+1. Open `AUTH_URL` — homepage loads with services + testimonials (**this proves the DB has data**).
 2. `/contact` — submit a test lead (career stage required).
 3. `/login` — admin email/password from step 4.
-4. `/admin` — the test lead is listed; Total leads ≥ 1.
-5. Refresh `/admin` — numbers stay (they come from Postgres).
+4. `/admin` — the test lead is listed; KPI cards show real numbers.
+5. Refresh `/admin` — numbers persist (from Postgres, not a cache).
 
-#### 8. Custom domain (optional)
+#### 8. Custom domain (optional) / later deploys
 
-1. Vercel project → Settings → Domains → add `careerstudio.example.com`.
-2. Follow the DNS instructions.
-3. Set `AUTH_URL=https://careerstudio.example.com` and **Redeploy**.
-
-#### 9. Later deploys
-
-```bash
-git add .
-git commit -m "Describe the change"
-git push origin main
-```
-
-Vercel rebuilds automatically. If you changed `prisma/schema.prisma`, run `npx prisma db push` against the hosted database again after the build.
+- Vercel project → Settings → Domains → add the domain, follow DNS. Set `AUTH_URL=https://your-domain.com` and **Redeploy**.
+- Later deploys: `git add . && git commit -m "..." && git push origin main` — Vercel rebuilds automatically.
+- If you changed `prisma/schema.prisma`, re-run `npx prisma db push` against the hosted database after the build.
 
 ---
 
@@ -669,6 +674,10 @@ Vercel rebuilds automatically. If you changed `prisma/schema.prisma`, run `npx p
 | Session / CSRF / “URL mismatch” | `AUTH_URL` ≠ the URL in the browser | Set `AUTH_URL` to the exact origin (`https://…` with no trailing slash) and restart / redeploy. |
 | `/admin` shows 0 leads after a contact submit | You booked a call (`/book`) rather than `/contact`, or you are looking at a different database | Contact form → `leads`. Booking form → `bookings`. Confirm `DATABASE_URL` is the same for the app that wrote the row. |
 | `prisma migrate deploy` errors on a fresh database | Migrations in this repo are incremental only | Use `npx prisma db push` for new databases (Docker already does this). |
+| "Application error: a server-side exception" (deploy succeeded; runtime logs show `The table public.X does not exist`) | Schema was never pushed to the **production** database | Run `npx prisma db push` + `npm run db:seed` against the direct Prisma Postgres URL (see Option C step 6). |
+| Vercel build fails: `Error: No entrypoint found. Searched for: src/main…` | Framework Preset is "Other", not Next.js | Set Framework Preset → Next.js (or re-import from GitHub). Do not add a `vercel.json`. |
+| Prisma CLI/`db push` says `Environment variable not found: DATABASE_URL` | `DATABASE_URL="…" npx prisma …` inline prefix doesn't work in cmd/PowerShell | Use `set "DATABASE_URL=…" && npx prisma …` (cmd) or `$env:DATABASE_URL="…"; npx prisma …` (PowerShell). |
+| Prisma connects to `postgres.railway.internal` or another host you don't use | A stale `DATABASE_URL` set as an OS env var overrides `.env` | `echo %DATABASE_URL%`, then delete it (Windows → System → Environment Variables) or override it in-shell. |
 | Port 3000 already in use | Another `next dev` or Compose stack | Stop it, or change the published port in `docker-compose.yml`. |
 
 More architecture notes: `docs/ARCHITECTURE.md`. Security assumptions: `docs/SECURITY.md`. The older free-tier sketch in `docs/DEPLOYMENT.md` is superseded by this section.
@@ -762,10 +771,5 @@ See `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, and `docs/DECISIONS.md` for deta
 
 See `REQUIREMENTS.md` for the full discovery list.
 
-## Time Taken
-
-[To be filled in honestly after completion]
-
-## License
-
-[TBD by GC Career Studio]
+## Author
+Teja Matta
